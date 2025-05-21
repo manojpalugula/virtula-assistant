@@ -1,7 +1,7 @@
 import pyttsx3
 import speech_recognition as sr
 import datetime
-import wikipedia
+import wikipedia # Changed from 'import wikipedia'
 import webbrowser
 import os
 import sys
@@ -11,7 +11,7 @@ from groq import Groq
 import subprocess
 import pyperclip
 import time
-import pyautogui
+# import pyautogui # Commented out for now, will be conditionally imported
 import re
 import json
 import shutil
@@ -23,11 +23,30 @@ from pptx import Presentation
 from pptx.util import Inches
 import textwrap
 import requests
+import keyboard # Replaced pynput with keyboard
+import time # Ensure time is imported
+
+# Conditional import for pyautogui
+try:
+    import pyautogui
+    pyautogui_available = True
+except Exception as e: # Catch generic exception for display issues like KeyError: 'DISPLAY' or import errors
+    print(f"PyAutoGUI could not be imported or initialized: {e}. GUI automation features will be disabled.")
+    pyautogui_available = False
+
+# Global state variables
+jarvis_active = False
+hotkey_registered = False # To track if the hotkey is active
+pyautogui_available = False # Ensure this is initialized before the try-except block for import
 
 # Initialize the text-to-speech engine
-engine = pyttsx3.init('sapi5')
+engine = pyttsx3.init() # Removed 'sapi5' to allow auto-detection
 voices = engine.getProperty('voices')
-engine.setProperty('voice', voices[0].id)
+# Attempt to set a voice, but handle if no voices are available (e.g., in some minimal environments)
+if voices and len(voices) > 0:
+    engine.setProperty('voice', voices[0].id)
+else:
+    print("No TTS voices found. Speech output may not work.")
 
 # Set up Spotify credentials
 sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
@@ -36,6 +55,41 @@ sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
     redirect_uri="http://localhost:8888/callback",
     scope="user-read-playback-state,user-modify-playback-state"
 ))
+
+# Activation callback function
+def activate_jarvis():
+    global jarvis_active, hotkey_registered
+    if not jarvis_active: # Ensure it only activates once if somehow called multiple times
+        print("Hotkey 'ctrl+j' pressed, activating Jarvis...")
+        # speak("Jarvis is activating.") # TTS might not work in all envs
+        jarvis_active = True
+        
+        # Remove the hotkey to prevent re-triggering while Jarvis is active
+        # and to allow Ctrl+J to be used for other purposes if Jarvis is in a long task.
+        if hotkey_registered:
+            try:
+                keyboard.remove_hotkey("ctrl+j")
+                print("Ctrl+J hotkey has been de-registered.")
+                hotkey_registered = False
+            except KeyError:
+                # This might happen if the key was already removed or never properly registered
+                print("Warning: Ctrl+J hotkey could not be removed or was not found.")
+            except Exception as e:
+                print(f"An error occurred while removing hotkey: {e}")
+
+def start_hotkey_listener(): # Renamed function
+    global hotkey_registered
+    if not hotkey_registered:
+        try:
+            # Register "ctrl+j" as the hotkey
+            keyboard.add_hotkey("ctrl+j", activate_jarvis, suppress=False) # Changed hotkey
+            hotkey_registered = True
+            print("Hotkey listener started. Press Ctrl+J to activate Jarvis.") # Changed message
+            # Removed note specific to FN key
+        except Exception as e:
+            print(f"Error setting up hotkey listener: {e}") # Changed message
+            print("Hotkey detection might not be supported or may require administrator privileges.") # Changed message
+            hotkey_registered = False
 
 def speak(audio):
     engine.say(audio)
@@ -267,11 +321,24 @@ def open_notepad_with_code(code):
     """
     Opens Notepad and writes the given code into it.
     """
-    notepad_path = "notepad.exe"
-    process = subprocess.Popen(notepad_path)
-    time.sleep(1)
-    pyperclip.copy(code)
-    pyautogui.hotkey("ctrl", "v")
+    notepad_path = "notepad.exe" # This is Windows-specific
+    pyperclip.copy(code) # Copying to clipboard should still work
+    speak("Code has been copied to your clipboard.")
+    try:
+        # Try to open Notepad, but don't fail if it's not Windows or doesn't open
+        if sys.platform == "win32": # Check if running on Windows
+            subprocess.Popen(notepad_path)
+            time.sleep(1) # Give Notepad a moment to open
+            if pyautogui_available:
+                pyautogui.hotkey("ctrl", "v")
+                speak("Pasted into Notepad.")
+            else:
+                speak("Please paste the code manually into Notepad or your preferred editor.")
+        else:
+            speak("Please paste the code into your preferred text editor.")
+    except Exception as e:
+        print(f"Could not open Notepad or paste: {e}")
+        speak("Could not open Notepad. Please paste the code manually.")
 
 def create_text_file_with_content(file_path, topic, api_key):
     content = query_groq(topic, api_key)
@@ -368,130 +435,193 @@ if __name__ == "__main__":
     api_key = "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"
     news_api_key = '0af8f4aac7614faa804bbccc4cf9fca2'
 
-    wishMe()
-    while True:
-        query = takeCommand().lower()
+    start_hotkey_listener() # Updated function call
 
-        if query == "none":
-            continue
+    try:
+        while not jarvis_active:
+            time.sleep(0.1) # Wait for activation
 
-        if 'wikipedia' in query:
-            speak('Searching Wikipedia...')
-            query = query.replace("wikipedia", "")
-            results = wikipedia.summary(query, sentences=2)
-            speak("According to Wikipedia")
-            print(results)
-            speak(results)
+        # The activate_jarvis function now handles hotkey removal.
+        # Redundant block removed as per instructions.
 
-        elif 'open youtube' in query:
-            webbrowser.open("youtube.com")
+        wishMe()
+        # Main command loop
+        while True:
+            query = takeCommand().lower()
 
-        elif 'open google' in query:
-            webbrowser.open("google.com")
+            if query == "none":
+                continue
 
-        elif 'search youtube' in query:
-            speak("What would you like to search on YouTube?")
-            search_query = takeCommand()
-            searchYouTube(search_query)
-            continue
+            if 'wikipedia' in query:
+                speak('Searching Wikipedia...')
+                query = query.replace("wikipedia", "").strip()
+                # Initialize Wikipedia API with a user agent
+                wiki_wiki = wikipediaapi.Wikipedia(
+                    language='en',
+                    user_agent="JarvisAssistant/1.0 (https://example.com/jarvis; jules@example.com)"
+                )
+                page_py = wiki_wiki.page(query)
+                if page_py.exists():
+                    # Get a summary, limit length to avoid very long outputs
+                    # Taking first 2 sentences by splitting and joining.
+                    # Summary often has newlines, so take a good chunk and then select sentences.
+                    full_summary = page_py.summary
+                    # A simple way to get first few sentences if summary is long
+                    sentences = full_summary.split('. ')
+                    if len(sentences) >= 2:
+                        results = sentences[0] + ". " + sentences[1] + "."
+                    else:
+                        results = full_summary[0:500] # Fallback to char limit
 
-        elif 'search google' in query:
-            speak("What would you like to search on Google?")
-            search_query = takeCommand()
-            searchGoogle(search_query)
-            continue
+                    speak("According to Wikipedia")
+                    print(results)
+                    speak(results)
+                else:
+                    speak(f"Sorry, I could not find a Wikipedia page for {query}")
+                    results = "No page found."
 
-        elif 'play a song' in query:
-            speak("Which song would you like to hear?")
-            song = takeCommand().lower()
-            playSpotifyTrack(song)
+            elif 'open youtube' in query:
+                webbrowser.open("youtube.com")
 
-        elif 'the time' in query:
-            strTime = datetime.datetime.now().strftime("%H:%M:%S")
-            speak(f"The time is {strTime}")
-            print(f"The time is {strTime}")
+            elif 'open google' in query:
+                webbrowser.open("google.com")
 
-        elif 'quit' in query:
-            speak("Have a nice day")
-            sys.exit()
+            elif 'search youtube' in query:
+                speak("What would you like to search on YouTube?")
+                search_query = takeCommand()
+                if search_query != "None": 
+                    searchYouTube(search_query)
+                continue
 
-        elif 'write a code' in query:
-            speak("What code would you like to write?")
-            code_query = takeCommand().lower()
-            code_response = query_groq(code_query, api_key)
-            print("Code Response:", code_response)
-            speak("I have written the code. Opening Notepad now.")
-            code_only = extract_code(code_response)
-            open_notepad_with_code(code_only)
+            elif 'search google' in query:
+                speak("What would you like to search on Google?")
+                search_query = takeCommand()
+                if search_query != "None": 
+                    searchGoogle(search_query)
+                continue
 
-        elif 'create a text file' in query:
-            speak("What should be the name of the text file?")
-            file_name = takeCommand()
-            speak("What should be the topic of the text file?")
-            topic = takeCommand()
-            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.txt')
-            create_text_file_with_content(file_path, topic, api_key)
+            elif 'play a song' in query:
+                speak("Which song would you like to hear?")
+                song = takeCommand().lower()
+                if song != "none": 
+                    playSpotifyTrack(song)
 
-        elif 'create a word file' in query:
-            speak("What should be the name of the Word file?")
-            file_name = takeCommand()
-            speak("What should be the topic of the Word file?")
-            topic = takeCommand()
-            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.docx')
-            create_word_file_with_content(file_path, topic, api_key)
+            elif 'the time' in query:
+                strTime = datetime.datetime.now().strftime("%H:%M:%S")
+                speak(f"The time is {strTime}")
+                print(f"The time is {strTime}")
 
-        elif 'create a folder' in query:
-            speak("What should be the name of the folder?")
-            folder_name = takeCommand()
-            folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
-            create_folder(folder_path)
+            elif 'quit' in query or 'exit' in query or 'stop' in query:
+                speak("Goodbye! Have a nice day.")
+                if hotkey_registered: # Should be false, but as a safeguard
+                    try:
+                        keyboard.remove_hotkey("ctrl+j") # Changed hotkey
+                    except KeyError:
+                        pass
+                sys.exit()
+
+            elif 'write a code' in query:
+                speak("What code would you like to write?")
+                code_query = takeCommand().lower()
+                if code_query != "none":
+                    code_response = query_groq(code_query, api_key)
+                    print("Code Response:", code_response)
+                    speak("I have written the code. Opening Notepad now.")
+                    code_only = extract_code(code_response)
+                    open_notepad_with_code(code_only)
+
+            elif 'create a text file' in query:
+                speak("What should be the name of the text file?")
+                file_name = takeCommand()
+                if file_name != "none":
+                    speak("What should be the topic of the text file?")
+                    topic = takeCommand()
+                    if topic != "none":
+                        file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.txt')
+                        create_text_file_with_content(file_path, topic, api_key)
+
+            elif 'create a word file' in query:
+                speak("What should be the name of the Word file?")
+                file_name = takeCommand()
+                if file_name != "none":
+                    speak("What should be the topic of the Word file?")
+                    topic = takeCommand()
+                    if topic != "none":
+                        file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.docx')
+                        create_word_file_with_content(file_path, topic, api_key)
             
-        elif 'delete file' in query:
-            speak("What is the name of the file to delete?")
-            file_name = takeCommand()
-            file_name = file_name.replace(" dot ", ".").replace(" ", "")
-            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name)
-            delete_file(file_path)
+            elif 'create a powerpoint' in query or 'create a ppt' in query or 'create ppt' in query or 'create presentation' in query:
+                speak("What should be the name of the PowerPoint file?")
+                file_name = takeCommand()
+                if file_name != "none":
+                    speak("What should be the presentation about?")
+                    topic = takeCommand()
+                    if topic != "none":
+                        file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.pptx')
+                        create_ppt_file_with_content(file_path, topic, api_key)
 
-        elif 'open file' in query:
-            speak("What is the name of the file to open?")
-            file_name = takeCommand()
-            file_name = file_name.replace(" dot ", ".").replace(" ", "")
-            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name)
-            open_file(file_path)
+            elif 'create a folder' in query:
+                speak("What should be the name of the folder?")
+                folder_name = takeCommand()
+                if folder_name != "none":
+                    folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
+                    create_folder(folder_path)
+                
+            elif 'delete file' in query:
+                speak("What is the name of the file to delete?")
+                file_name = takeCommand()
+                if file_name != "none":
+                    file_name = file_name.replace(" dot ", ".").replace(" ", "")
+                    file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name)
+                    delete_file(file_path)
 
-        elif 'open folder' in query:
-            speak("What is the name of the folder to open?")
-            folder_name = takeCommand()
-            folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
-            open_folder(folder_path)
+            elif 'open file' in query:
+                speak("What is the name of the file to open?")
+                file_name = takeCommand()
+                if file_name != "none":
+                    file_name = file_name.replace(" dot ", ".").replace(" ", "")
+                    file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name)
+                    open_file(file_path)
 
-        elif 'list files' in query:
-            speak("Which folder do you want to list the files of?")
-            folder_name = takeCommand()
-            folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
-            list_files_in_folder(folder_path)
+            elif 'open folder' in query:
+                speak("What is the name of the folder to open?")
+                folder_name = takeCommand()
+                if folder_name != "none":
+                    folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
+                    open_folder(folder_path)
 
-        elif 'weather' in query:
-            speak("Please tell me the city name.")
-            city_name = takeCommand()
-            get_weather(city_name)
+            elif 'list files' in query:
+                speak("Which folder do you want to list the files of?")
+                folder_name = takeCommand()
+                if folder_name != "none":
+                    folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
+                    list_files_in_folder(folder_path)
 
-        elif 'news' in query:
-            speak("What topic would you like news about?")
-            news_topic = takeCommand().lower()
-            news_update = get_news(news_api_key, news_topic)
-            speak(news_update)
-        
-        elif 'create a powerpoint' in query or 'create a ppt' in query or 'create ppt' in query or 'create presentation' in query:
-            speak("What should be the name of the PowerPoint file?")
-            file_name = takeCommand()
-            speak("What should be the presentation about?")
-            topic = takeCommand()
-            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.pptx')
-            create_ppt_file_with_content(file_path, topic, api_key)
+            elif 'weather' in query:
+                speak("Please tell me the city name.")
+                city_name = takeCommand()
+                if city_name != "none":
+                    get_weather(city_name)
 
-        else:
-            response = query_groq(query, api_key)
-            print("Response:", response)
-            speak(response)
+            elif 'news' in query:
+                speak("What topic would you like news about?")
+                news_topic = takeCommand().lower()
+                if news_topic != "none":
+                    news_update = get_news(news_api_key, news_topic)
+                    speak(news_update)
+            
+            else: # Default to Groq for other queries
+                response = query_groq(query, api_key)
+                print("Response:", response)
+                speak(response)
+
+    except KeyboardInterrupt:
+        print("Program interrupted by user.")
+    finally:
+        if hotkey_registered:
+            try:
+                keyboard.remove_hotkey("ctrl+j") # Changed hotkey
+                print("Ctrl+J hotkey removed on exit.") # Changed message
+            except KeyError:
+                pass # Already removed or never set
+        print("Exiting Jarvis.")
