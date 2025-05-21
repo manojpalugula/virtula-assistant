@@ -16,13 +16,13 @@ import re
 import json
 import shutil
 from docx import Document
-from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
-from google.auth.transport.requests import Request
+from pptx.util import Pt, Inches
+from pptx.enum.text import PP_ALIGN
+from pptx.dml.color import RGBColor
+from pptx import Presentation
+from pptx.util import Inches
+import textwrap
 import requests
-from config import (SPOTIPY_CLIENT_ID, SPOTIPY_CLIENT_SECRET, SPOTIPY_REDIRECT_URI,
-                    GROQ_API_KEY, SCOPES, CREDENTIALS_FILE, TOKEN_FILE, WEATHER_API_KEY, NEWS_API_KEY)
 
 # Initialize the text-to-speech engine
 engine = pyttsx3.init('sapi5')
@@ -31,28 +31,11 @@ engine.setProperty('voice', voices[0].id)
 
 # Set up Spotify credentials
 sp = spotipy.Spotify(auth_manager=SpotifyOAuth(
-    client_id=SPOTIPY_CLIENT_ID,
-    client_secret=SPOTIPY_CLIENT_SECRET,
-    redirect_uri=SPOTIPY_REDIRECT_URI,
+    client_id="bc4b741fbf23492f939365b367a95119",
+    client_secret="1db92c2b6116461c8b6063925b21974c",
+    redirect_uri="http://localhost:8888/callback",
     scope="user-read-playback-state,user-modify-playback-state"
 ))
-
-def authenticate_google_slides():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE)
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_FILE, 'w') as token:
-            token.write(creds.to_json())
-    return creds
-
-creds = authenticate_google_slides()
-service = build('slides', 'v1', credentials=creds)
 
 def speak(audio):
     engine.say(audio)
@@ -106,8 +89,8 @@ def searchYouTube(query):
     url = f"https://www.youtube.com/results?search_query={query}"
     webbrowser.open(url)
 
-def query_groq(query):
-    client = Groq(api_key=GROQ_API_KEY)
+def query_groq(query, api_key):
+    client = Groq(api_key=api_key)
     chat_completion = client.chat.completions.create(
         messages=[
             {
@@ -119,96 +102,278 @@ def query_groq(query):
     )
     return chat_completion.choices[0].message.content
 
-def add_slide(presentation_id, title, content):
-    print("Adding slide...")
+PIXABAY_API_KEY = "50245343-f63fa43cdf38d8cb5f42a3c68"  # Get from https://pixabay.com/api/docs/
 
-    requests = [
-        {
-            'createSlide': {
-                'slideLayoutReference': {
-                    'predefinedLayout': 'TITLE_AND_BODY'
-                }
-            }
-        }
-    ]
+def get_pixabay_image(query):
+    """Fetch relevant image from Pixabay"""
+    try:
+        url = f"https://pixabay.com/api/?key={PIXABAY_API_KEY}&q={query}&image_type=photo&per_page=3"
+        response = requests.get(url).json()
+        if response['hits']:
+            return response['hits'][0]['webformatURL']  # Medium quality image
+    except Exception as e:
+        print(f"Pixabay error: {e}")
+    return None
 
-    response = service.presentations().batchUpdate(
-        presentationId=presentation_id, body={'requests': requests}).execute()
+def download_image(image_url, filename="temp_img.jpg"):
+    """Download image from URL"""
+    try:
+        response = requests.get(image_url)
+        with open(filename, 'wb') as f:
+            f.write(response.content)
+        return filename
+    except Exception as e:
+        print(f"Image download failed: {e}")
+        return None
 
-    slide_id = response['replies'][0]['createSlide']['objectId']
+# --- Enhanced Content Processing ---
+def clean_groq_content(content):
+    """Remove unwanted * markers and format content"""
+    # Remove * characters but preserve bullet structure
+    content = content.replace('*', '')
+    # Convert markdown-like bullets to proper formatting
+    content = re.sub(r'^\s*-\s+', '• ', content, flags=re.MULTILINE)
+    content = re.sub(r'^\s*•\s+', '• ', content, flags=re.MULTILINE)
+    # Remove excessive line breaks
+    content = '\n'.join([x.strip() for x in content.split('\n') if x.strip()])
+    return content
 
-    layouts = service.presentations().pages().get(
-        presentationId=presentation_id, pageObjectId=slide_id).execute()
+def split_into_slides(content, max_lines=6):
+    """Split content into slide-sized chunks with smart wrapping"""
+    paragraphs = [p for p in content.split('\n') if p.strip()]
+    slides = []
+    current_slide = []
+    
+    for para in paragraphs:
+        wrapped = textwrap.wrap(para, width=80)  # 80 chars per line
+        if len(current_slide) + len(wrapped) > max_lines:
+            slides.append('\n'.join(current_slide))
+            current_slide = []
+        current_slide.extend(wrapped)
+    
+    if current_slide:
+        slides.append('\n'.join(current_slide))
+    
+    return slides if slides else [content]
 
-    title_id = None
-    body_id = None
+# --- Enhanced PowerPoint Creation ---
+def create_ppt_file_with_content(file_path, topic, api_key):
+    """Generate a structured PowerPoint with text on the left and scaled image on the right."""
+    prompt = f"""
+Create a PowerPoint presentation about "{topic}" with 3 to 5 slides.
+Each slide must follow this format:
 
-    for element in layouts.get('pageElements', []):
-        if 'shape' in element:
-            shape = element['shape']
-            if 'placeholder' in shape:
-                placeholder = shape['placeholder']
-                if placeholder['type'] == 'TITLE':
-                    title_id = element['objectId']
-                elif placeholder['type'] == 'BODY':
-                    body_id = element['objectId']
+[SLIDE TITLE: Slide title here]
+[CONTENT:
+- Bullet point 1
+- Bullet point 2
+- Bullet point 3
+]
+[IMAGE KEYWORD: relevant image keyword]
 
-    if title_id and body_id:
-        requests = [
-            {
-                'insertText': {
-                    'objectId': title_id,
-                    'text': title,
-                    'insertionIndex': 0
-                }
-            },
-            {
-                'insertText': {
-                    'objectId': body_id,
-                    'text': content,
-                    'insertionIndex': 0
-                }
-            }
-        ]
+Use '---' to separate each slide.
+Stick exactly to the format.
+"""
+    raw_content = query_groq(prompt, api_key)
+    slides = [slide.strip() for slide in raw_content.split('---') if slide.strip()]
 
-        response = service.presentations().batchUpdate(
-            presentationId=presentation_id, body={'requests': requests}).execute()
+    prs = Presentation()
+    slide_width = prs.slide_width
+    slide_height = prs.slide_height
 
-def create_presentation_with_content(title, content):
-    presentation = service.presentations().create(body={'title': title}).execute()
-    presentation_id = presentation['presentationId']
-    add_slide(presentation_id, title, content)
+    # Title Slide
+    title_slide = prs.slides.add_slide(prs.slide_layouts[0])
+    title_slide.shapes.title.text = topic
+    title_slide.placeholders[1].text = "Created by Jarvis Assistant"
+
+    for i, slide_content in enumerate(slides[:5]):
+        title_match = re.search(r'\[SLIDE TITLE:\s*(.+?)\]', slide_content, re.IGNORECASE)
+        content_match = re.search(r'\[CONTENT:(.+?)\](?:\[IMAGE|\Z)', slide_content, re.DOTALL | re.IGNORECASE)
+        image_match = re.search(r'\[IMAGE KEYWORD:\s*(.+?)\]', slide_content, re.IGNORECASE)
+
+        if not content_match or not content_match.group(1).strip():
+            continue
+
+        # Blank layout
+        slide = prs.slides.add_slide(prs.slide_layouts[6])
+
+        # Title box
+        title_text = title_match.group(1).strip() if title_match else f"{topic} - Slide {i+1}"
+        title_box = slide.shapes.add_textbox(Inches(0.5), Inches(0.2), slide_width - Inches(1), Inches(1))
+        tf = title_box.text_frame
+        p = tf.paragraphs[0]
+        p.text = f'"{title_text}"'
+        p.font.size = Pt(32)
+        p.font.bold = True
+        p.font.color.rgb = RGBColor(59, 89, 152)
+        p.alignment = PP_ALIGN.LEFT
+
+        # Text on left
+        left_box = slide.shapes.add_textbox(Inches(0.5), Inches(1.2), Inches(5.5), slide_height - Inches(2))
+        tf = left_box.text_frame
+        tf.word_wrap = True
+
+        bullet_lines = [line.strip("-*• ") for line in content_match.group(1).strip().split("\n") if line.strip()]
+        for line in bullet_lines:
+            para = tf.add_paragraph()
+            para.text = f"• {line}"
+            para.level = 0
+            para.font.size = Pt(20)
+
+        # Image on right
+        if image_match:
+            img_keyword = image_match.group(1).strip()
+            img_url = get_pixabay_image(img_keyword)
+            if img_url:
+                img_path = download_image(img_url)
+                if img_path:
+                    try:
+                        # Smaller, better-aligned image
+                        left = Inches(6.0)
+                        top = Inches(1.8)
+                        slide.shapes.add_picture(img_path, left, top, width=Inches(3.5))
+                        os.remove(img_path)
+                    except Exception as e:
+                        print(f"Image error: {e}")
+
+    # Thank you slide
+    thank_slide = prs.slides.add_slide(prs.slide_layouts[5])
+    txBox = thank_slide.shapes.add_textbox(Inches(1), Inches(2), prs.slide_width - Inches(2), Inches(1.5))
+    tf = txBox.text_frame
+    p = tf.paragraphs[0]
+    p.text = "Thank You!"
+    p.font.size = Pt(48)
+    p.font.color.rgb = RGBColor(59, 89, 152)
+    p.alignment = PP_ALIGN.CENTER
+
+    try:
+        prs.save(file_path)
+        speak(f"Presentation saved as {os.path.basename(file_path)}")
+        open_file(file_path)
+    except PermissionError:
+        speak("Please close the file if it's already open and try again.")
+
+def extract_code(response):
+    """
+    Extracts the code portion from the given response.
+    """
+    code_pattern = re.compile(r'```(.*?)```', re.DOTALL)
+    match = code_pattern.search(response)
+    if match:
+        return match.group(1).strip()
+    return response
+
+def open_notepad_with_code(code):
+    """
+    Opens Notepad and writes the given code into it.
+    """
+    notepad_path = "notepad.exe"
+    process = subprocess.Popen(notepad_path)
+    time.sleep(1)
+    pyperclip.copy(code)
+    pyautogui.hotkey("ctrl", "v")
+
+def create_text_file_with_content(file_path, topic, api_key):
+    content = query_groq(topic, api_key)
+    with open(file_path, 'w') as file:
+        file.write(content)
+    speak(f"Text file '{os.path.basename(file_path)}' created on Desktop")
+    open_file(file_path)
+
+def create_word_file_with_content(file_path, topic, api_key):
+    content = query_groq(topic, api_key)
+    doc = Document()
+    doc.add_heading(topic, 0)
+    doc.add_paragraph(content)
+    doc.save(file_path)
+    speak(f"Word file '{os.path.basename(file_path)}' created on Desktop")
+    open_file(file_path)
+
+def create_folder(folder_path):
+    os.makedirs(folder_path, exist_ok=True)
+    speak(f"Folder '{os.path.basename(folder_path)}' created on Desktop")
+    open_folder(folder_path)
+
+def delete_file(file_path):
+    try:
+        os.remove(file_path)
+        speak(f"File '{os.path.basename(file_path)}' deleted from Desktop")
+    except FileNotFoundError:
+        speak(f"File '{os.path.basename(file_path)}' not found on Desktop")
+
+def open_file(file_path):
+    try:
+        os.startfile(file_path)
+    except FileNotFoundError:
+        speak(f"File '{os.path.basename(file_path)}' not found on Desktop")
+
+def open_folder(folder_path):
+    try:
+        os.startfile(folder_path)
+    except FileNotFoundError:
+        speak(f"Folder '{os.path.basename(folder_path)}' not found on Desktop")
+
+def list_files_in_folder(folder_path):
+    try:
+        files = os.listdir(folder_path)
+        if files:
+            speak(f"Files in '{os.path.basename(folder_path)}' are:")
+            for file in files:
+                speak(file)
+        else:
+            speak(f"No files found in '{os.path.basename(folder_path)}'")
+    except FileNotFoundError:
+        speak(f"Folder '{os.path.basename(folder_path)}' not found on Desktop")
 
 def get_weather(city):
-    base_url = f"http://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_API_KEY}&units=metric"
-    response = requests.get(base_url)
-    data = response.json()
-    if data['cod'] != '404':
-        main = data['main']
-        temperature = main['temp']
-        weather_description = data['weather'][0]['description']
-        return f"Temperature in {city} is {temperature}°C with {weather_description}."
-    else:
-        return f"City {city} not found."
+    api_key = "ba621bd65e6bf4c55568056c986c200e"
+    base_url = "http://api.openweathermap.org/data/2.5/weather?"
+    complete_url = base_url + "q=" + city + "&appid=" + api_key + "&units=metric"
+    response = requests.get(complete_url)
+    weather_data = response.json()
+    
+    if weather_data["cod"] != "404":
+        main = weather_data["main"]
+        wind = weather_data["wind"]
+        weather = weather_data["weather"][0]
+        temperature = main["temp"]
+        humidity = main["humidity"]
+        weather_description = weather["description"]
+        wind_speed = wind["speed"]
 
-def get_news(query):
-    url = f'https://newsapi.org/v2/everything?q={query}&apiKey={NEWS_API_KEY}'
+        weather_report = (f"Temperature: {temperature}°C\n"
+                          f"Humidity: {humidity}%\n"
+                          f"Weather description: {weather_description}\n"
+                          f"Wind speed: {wind_speed} meter per second")
+
+        print(weather_report)
+        speak(weather_report)
+    else:
+        speak("City not found. Please try again.")
+
+def get_news(api_key, query):
+    url = f"https://newsapi.org/v2/everything?q={query}&apiKey={api_key}"
     response = requests.get(url)
     data = response.json()
     if data['status'] == 'ok':
         articles = data['articles']
-        if articles:
-            news = [f"{article['title']} - {article['source']['name']}" for article in articles[:5]]
-            return news
-        else:
-            return ["No news articles found."]
+        news_list = []
+        for article in articles[:5]:  # Limit to the top 5 news articles
+            news_list.append(f"Title: {article['title']}. Description: {article['description']}.")
+        return " ".join(news_list)
     else:
-        return ["Error retrieving news."]
+        return "Could not retrieve news."
 
 if __name__ == "__main__":
+    api_key = "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"
+    news_api_key = '0af8f4aac7614faa804bbccc4cf9fca2'
+
     wishMe()
     while True:
         query = takeCommand().lower()
+
+        if query == "none":
+            continue
 
         if 'wikipedia' in query:
             speak('Searching Wikipedia...')
@@ -219,38 +384,114 @@ if __name__ == "__main__":
             speak(results)
 
         elif 'open youtube' in query:
-            searchYouTube(query)
+            webbrowser.open("youtube.com")
 
         elif 'open google' in query:
-            searchGoogle(query)
+            webbrowser.open("google.com")
 
-        elif 'play' in query and 'spotify' in query:
-            track_name = query.replace("play", "").replace("on spotify", "").strip()
-            playSpotifyTrack(track_name)
+        elif 'search youtube' in query:
+            speak("What would you like to search on YouTube?")
+            search_query = takeCommand()
+            searchYouTube(search_query)
+            continue
 
-        elif 'create presentation' in query:
-            speak('What is the title of the presentation?')
-            title = takeCommand()
-            speak('What is the content of the presentation?')
-            content = takeCommand()
-            create_presentation_with_content(title, content)
-            speak('Presentation created successfully.')
+        elif 'search google' in query:
+            speak("What would you like to search on Google?")
+            search_query = takeCommand()
+            searchGoogle(search_query)
+            continue
 
-        elif 'weather in' in query:
-            city = query.split("in")[-1].strip()
-            weather_info = get_weather(city)
-            speak(weather_info)
+        elif 'play a song' in query:
+            speak("Which song would you like to hear?")
+            song = takeCommand().lower()
+            playSpotifyTrack(song)
 
-        elif 'news about' in query:
-            topic = query.split("about")[-1].strip()
-            news_articles = get_news(topic)
-            for article in news_articles:
-                speak(article)
+        elif 'the time' in query:
+            strTime = datetime.datetime.now().strftime("%H:%M:%S")
+            speak(f"The time is {strTime}")
+            print(f"The time is {strTime}")
 
-        elif 'exit' in query or 'quit' in query:
-            speak("Goodbye!")
-            break
+        elif 'quit' in query:
+            speak("Have a nice day")
+            sys.exit()
+
+        elif 'write a code' in query:
+            speak("What code would you like to write?")
+            code_query = takeCommand().lower()
+            code_response = query_groq(code_query, api_key)
+            print("Code Response:", code_response)
+            speak("I have written the code. Opening Notepad now.")
+            code_only = extract_code(code_response)
+            open_notepad_with_code(code_only)
+
+        elif 'create a text file' in query:
+            speak("What should be the name of the text file?")
+            file_name = takeCommand()
+            speak("What should be the topic of the text file?")
+            topic = takeCommand()
+            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.txt')
+            create_text_file_with_content(file_path, topic, api_key)
+
+        elif 'create a word file' in query:
+            speak("What should be the name of the Word file?")
+            file_name = takeCommand()
+            speak("What should be the topic of the Word file?")
+            topic = takeCommand()
+            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.docx')
+            create_word_file_with_content(file_path, topic, api_key)
+
+        elif 'create a folder' in query:
+            speak("What should be the name of the folder?")
+            folder_name = takeCommand()
+            folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
+            create_folder(folder_path)
+            
+        elif 'delete file' in query:
+            speak("What is the name of the file to delete?")
+            file_name = takeCommand()
+            file_name = file_name.replace(" dot ", ".").replace(" ", "")
+            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name)
+            delete_file(file_path)
+
+        elif 'open file' in query:
+            speak("What is the name of the file to open?")
+            file_name = takeCommand()
+            file_name = file_name.replace(" dot ", ".").replace(" ", "")
+            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name)
+            open_file(file_path)
+
+        elif 'open folder' in query:
+            speak("What is the name of the folder to open?")
+            folder_name = takeCommand()
+            folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
+            open_folder(folder_path)
+
+        elif 'list files' in query:
+            speak("Which folder do you want to list the files of?")
+            folder_name = takeCommand()
+            folder_path = os.path.join(os.path.expanduser('~'), 'Desktop', folder_name)
+            list_files_in_folder(folder_path)
+
+        elif 'weather' in query:
+            speak("Please tell me the city name.")
+            city_name = takeCommand()
+            get_weather(city_name)
+
+        elif 'news' in query:
+            speak("What topic would you like news about?")
+            news_topic = takeCommand().lower()
+            news_update = get_news(news_api_key, news_topic)
+            speak(news_update)
+        
+        elif 'create a powerpoint' in query or 'create a ppt' in query or 'create ppt' in query or 'create presentation' in query:
+            speak("What should be the name of the PowerPoint file?")
+            file_name = takeCommand()
+            speak("What should be the presentation about?")
+            topic = takeCommand()
+            file_path = os.path.join(os.path.expanduser('~'), 'Desktop', file_name + '.pptx')
+            create_ppt_file_with_content(file_path, topic, api_key)
 
         else:
-            response = query_groq(query)
+            response = query_groq(query, api_key)
+            print("Response:", response)
             speak(response)
